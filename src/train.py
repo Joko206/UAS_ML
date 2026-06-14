@@ -9,7 +9,7 @@ from sklearn.preprocessing import StandardScaler, OneHotEncoder
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import classification_report, accuracy_score, precision_score, recall_score, f1_score
+from sklearn.metrics import classification_report, accuracy_score, precision_score, recall_score, f1_score, ConfusionMatrixDisplay
 import joblib
 
 def plot_learning_curve(estimator, title, X, y, cv, n_jobs=-1, train_sizes=np.linspace(.1, 1.0, 5), save_path=None):
@@ -86,12 +86,11 @@ def main():
             ('cat', categorical_transformer, categorical_features)
         ])
     
-    # 3. Data Splitting (Train, Validation, Test)
-    # 70% Train, 15% Validation, 15% Test
-    X_temp, X_test, y_temp, y_test = train_test_split(X, y, test_size=0.15, random_state=42)
-    X_train, X_val, y_train, y_val = train_test_split(X_temp, y_temp, test_size=0.1764, random_state=42) # 0.1764 dari 85% ~ 15% dari total
+    # 3. Data Splitting (Train, Test)
+    # Sesuai paper: 80% Train, 20% Test murni (tanpa set validasi eksplisit karena kita pakai CV)
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.20, random_state=42)
     
-    print(f"Ukuran Data - Train: {len(X_train)}, Validation: {len(X_val)}, Test: {len(X_test)}")
+    print(f"Ukuran Data - Train: {len(X_train)}, Test: {len(X_test)}")
     
     # --- MODEL 1: BASELINE (Logistic Regression) ---
     print("\n[1] Melatih Baseline Model: Logistic Regression")
@@ -100,8 +99,19 @@ def main():
         ('classifier', LogisticRegression(random_state=42))
     ])
     baseline_pipeline.fit(X_train, y_train)
-    y_val_pred_base = baseline_pipeline.predict(X_val)
-    print(f"Baseline Validation Accuracy: {accuracy_score(y_val, y_val_pred_base):.4f}")
+    
+    # Metrik Regresi Logistik
+    print("--- METRIK REGRESI LOGISTIK ---")
+    y_train_pred_lr = baseline_pipeline.predict(X_train)
+    y_test_pred_lr = baseline_pipeline.predict(X_test)
+    print(f"Data Latih - Akurasi: {accuracy_score(y_train, y_train_pred_lr):.4f}, Presisi: {precision_score(y_train, y_train_pred_lr):.4f}, Recall: {recall_score(y_train, y_train_pred_lr):.4f}, F1: {f1_score(y_train, y_train_pred_lr):.4f}")
+    print(f"Data Uji   - Akurasi: {accuracy_score(y_test, y_test_pred_lr):.4f}, Presisi: {precision_score(y_test, y_test_pred_lr):.4f}, Recall: {recall_score(y_test, y_test_pred_lr):.4f}, F1: {f1_score(y_test, y_test_pred_lr):.4f}")
+    
+    # Simpan Confusion Matrix LR
+    ConfusionMatrixDisplay.from_estimator(baseline_pipeline, X_test, y_test, cmap='Blues')
+    plt.title('Confusion Matrix - Logistic Regression')
+    plt.savefig(os.path.join(models_dir, 'cm_lr.png'))
+    plt.close()
     
     # --- MODEL 2: KOMPLEKS (Random Forest) dg Hyperparameter Tuning ---
     print("\n[2] Melatih Model Kompleks: Random Forest dengan GridSearchCV")
@@ -116,18 +126,50 @@ def main():
         'classifier__min_samples_split': [2, 5]
     }
     
-    grid_search = GridSearchCV(rf_pipeline, param_grid, cv=5, scoring='accuracy', n_jobs=-1)
+    # Optimalisasi terfokus pada Recall sesuai urgensi klinis di paper
+    grid_search = GridSearchCV(rf_pipeline, param_grid, cv=5, scoring='recall', n_jobs=-1)
     grid_search.fit(X_train, y_train)
     
     best_model = grid_search.best_estimator_
-    print(f"Parameter Terbaik Random Forest: {grid_search.best_params_}")
+    print(f"\nParameter Terbaik Random Forest: {grid_search.best_params_}")
     
-    y_val_pred_rf = best_model.predict(X_val)
-    print(f"Optimized Random Forest Validation Accuracy: {accuracy_score(y_val, y_val_pred_rf):.4f}")
+    # Metrik Random Forest
+    print("--- METRIK RANDOM FOREST ---")
+    y_train_pred_rf = best_model.predict(X_train)
+    y_test_pred_rf = best_model.predict(X_test)
+    print(f"Data Latih - Akurasi: {accuracy_score(y_train, y_train_pred_rf):.4f}, Presisi: {precision_score(y_train, y_train_pred_rf):.4f}, Recall: {recall_score(y_train, y_train_pred_rf):.4f}, F1: {f1_score(y_train, y_train_pred_rf):.4f}")
+    print(f"Data Uji   - Akurasi: {accuracy_score(y_test, y_test_pred_rf):.4f}, Presisi: {precision_score(y_test, y_test_pred_rf):.4f}, Recall: {recall_score(y_test, y_test_pred_rf):.4f}, F1: {f1_score(y_test, y_test_pred_rf):.4f}")
     
+    # Simpan Confusion Matrix RF
+    ConfusionMatrixDisplay.from_estimator(best_model, X_test, y_test, cmap='Blues')
+    plt.title('Confusion Matrix - Random Forest')
+    plt.savefig(os.path.join(models_dir, 'cm_rf.png'))
+    plt.close()
+    
+    # Feature Importance
+    try:
+        import seaborn as sns
+        ohe_cols = preprocessor.named_transformers_['cat'].named_steps['onehot'].get_feature_names_out(categorical_features)
+        feature_names = numeric_features + list(ohe_cols)
+        importances = best_model.named_steps['classifier'].feature_importances_
+        indices = np.argsort(importances)[::-1]
+        
+        plt.figure(figsize=(10, 6))
+        sns.barplot(x=importances[indices][:10], y=[feature_names[i] for i in indices][:10])
+        plt.title('Top 10 Feature Importance (Random Forest)')
+        plt.savefig(os.path.join(models_dir, 'feature_importance_rf.png'), bbox_inches='tight')
+        plt.close()
+    except Exception as e:
+        print("Could not plot feature importance:", e)
+        
+        print("Could not plot feature importance:", e)
+        
+    final_best_model = best_model
+    best_model_name = "Random Forest"
+
     # --- EVALUASI PADA TEST SET MENGGUNAKAN MODEL TERBAIK ---
-    print("\n[3] Evaluasi Model Terbaik pada Data Uji (Test Set)")
-    y_test_pred = best_model.predict(X_test)
+    print(f"\n[3] Evaluasi Model Utama ({best_model_name}) pada Data Uji (Test Set)")
+    y_test_pred = final_best_model.predict(X_test)
     
     acc = accuracy_score(y_test, y_test_pred)
     prec = precision_score(y_test, y_test_pred)
@@ -142,14 +184,32 @@ def main():
     print(classification_report(y_test, y_test_pred))
     
     # --- LEARNING CURVE ---
-    print("\n[4] Membuat Learning Curve...")
+    print("\n[4] Membuat Learning Curve & Analisis Overfitting/Underfitting...")
     curve_path = os.path.join(models_dir, 'learning_curve.png')
-    plot_learning_curve(best_model, "Learning Curve (Random Forest)", X_train, y_train, cv=5, save_path=curve_path)
-    print(f"Grafik Learning Curve disimpan di: {curve_path}")
+    plot_learning_curve(final_best_model, f"Learning Curve ({best_model_name})", X_train, y_train, cv=5, save_path=curve_path)
+    
+    # Analisis otomatis Overfitting/Underfitting untuk laporan
+    train_sizes, train_scores, test_scores = learning_curve(
+        final_best_model, X_train, y_train, cv=5, n_jobs=-1, scoring='accuracy')
+    final_train_score = np.mean(train_scores, axis=1)[-1]
+    final_test_score = np.mean(test_scores, axis=1)[-1]
+    gap = final_train_score - final_test_score
+    
+    print(f"Skor Akurasi Training Akhir : {final_train_score:.4f}")
+    print(f"Skor Akurasi Validasi Akhir : {final_test_score:.4f}")
+    
+    if gap > 0.05:
+        print("Analisis: Terdapat gejala OVERFITTING. Model bekerja sangat baik di data latih, namun sedikit menurun di data validasi.")
+    elif final_train_score < 0.70:
+        print("Analisis: Terdapat gejala UNDERFITTING. Model gagal mempelajari pola data secara maksimal (skor terlalu rendah).")
+    else:
+        print("Analisis: Model GOOD FIT (Optimal). Jarak antara akurasi latih dan validasi sangat tipis, model menggeneralisasi dengan baik.")
+        
+    print(f"\nGrafik Learning Curve visual disimpan di: {curve_path}")
     
     # Simpan Model
     model_save_path = os.path.join(models_dir, 'best_model.pkl')
-    joblib.dump(best_model, model_save_path)
+    joblib.dump(final_best_model, model_save_path)
     print(f"\nModel terbaik berhasil disimpan di: {model_save_path}")
 
 if __name__ == "__main__":
